@@ -12,7 +12,7 @@ import {
 import type { Board } from "@/lib/board";
 import type { Net } from "@/lib/net";
 
-export type Tool = "pen" | "eraser";
+export type Tool = "pen" | "eraser" | "sticker";
 
 /** World units. The eraser also allows for half the width of the stroke it tests. */
 export const ERASER_RADIUS = 32;
@@ -25,6 +25,7 @@ type Props = {
   tool: Tool;
   color: number;
   width: number;
+  sticker: number;
   enabled: boolean;
   onReady: (renderer: Renderer) => void;
   onHistory: () => void;
@@ -37,7 +38,9 @@ function same(a: LocalCursor | null, b: LocalCursor | null): boolean {
     a.y === b.y &&
     a.color === b.color &&
     a.radius === b.radius &&
-    a.eraser === b.eraser
+    a.eraser === b.eraser &&
+    a.sticker?.index === b.sticker?.index &&
+    a.sticker?.size === b.sticker?.size
   );
 }
 
@@ -117,6 +120,19 @@ export default function Canvas(props: Props) {
       net.begin(id, color, width, point.x, point.y);
     };
 
+    const place = (point: { x: number; y: number }) => {
+      const net = live.current.net;
+      if (!net || net.author === 0) return;
+
+      ordinal = Math.max(ordinal, board.nextOrdinal(net.author));
+      const id = makeStrokeId(net.author, ordinal++);
+      const { sticker, width } = live.current;
+      const stroke = board.stampLocal(id, net.author, sticker, width, point.x, point.y);
+      renderer.stamp(stroke);
+      net.stamp(id, sticker, width, point.x, point.y);
+      live.current.onHistory();
+    };
+
     const finish = () => {
       const stroke = drawing;
       drawing = null;
@@ -138,6 +154,7 @@ export default function Canvas(props: Props) {
       at = point;
       hover = point;
       if (gesture === "eraser") wipe(point, point);
+      else if (gesture === "sticker") place(point);
       else start(point);
     };
 
@@ -163,6 +180,8 @@ export default function Canvas(props: Props) {
         }
         return;
       }
+
+      if (gesture === "sticker") return;
 
       let fresh: number[] = [];
       const push = () => {
@@ -241,7 +260,7 @@ export default function Canvas(props: Props) {
         renderer.setCursors(painted);
       }
 
-      const { tool, color, width, enabled } = live.current;
+      const { tool, color, width, sticker, enabled } = live.current;
       const mark: LocalCursor | null =
         hover && enabled
           ? {
@@ -253,6 +272,7 @@ export default function Canvas(props: Props) {
                   ? ERASER_RADIUS
                   : (WIDTHS[width] ?? WIDTHS[0]) / 2 + 1,
               eraser: tool === "eraser",
+              sticker: tool === "sticker" ? { index: sticker, size: width } : null,
             }
           : null;
 

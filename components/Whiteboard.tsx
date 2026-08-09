@@ -47,6 +47,7 @@ export default function Whiteboard({ board: name }: { board: string }) {
   const [tool, setTool] = useState<Tool>("pen");
   const [color, setColor] = useState(0);
   const [width, setWidth] = useState(1);
+  const [sticker, setSticker] = useState(0);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
@@ -81,6 +82,7 @@ export default function Whiteboard({ board: name }: { board: string }) {
           if (change.kind === "begin") renderer.begin(change.stroke);
           else if (change.kind === "points") renderer.extend(change.stroke);
           else if (change.kind === "end") renderer.end(change.stroke);
+          else if (change.kind === "stamp") renderer.stamp(change.stroke);
         }
       },
       onCursors: (cursors) => {
@@ -171,6 +173,7 @@ export default function Whiteboard({ board: name }: { board: string }) {
         tool={tool}
         color={color}
         width={width}
+        sticker={sticker}
         enabled={joined && author !== 0}
         onReady={onReady}
         onHistory={syncHistory}
@@ -204,11 +207,13 @@ export default function Whiteboard({ board: name }: { board: string }) {
             tool={tool}
             color={color}
             width={width}
+            sticker={sticker}
             canUndo={canUndo}
             canRedo={canRedo}
             onTool={setTool}
             onColor={setColor}
             onWidth={setWidth}
+            onSticker={setSticker}
             onUndo={undo}
             onRedo={redo}
             className="pointer-events-auto"
@@ -218,7 +223,7 @@ export default function Whiteboard({ board: name }: { board: string }) {
         <div className="flex w-full items-end justify-between gap-3">
           <StatusBadge hud={hud} className="pointer-events-auto" />
           <p className="hud-label hidden lg:block">
-            P pen · E eraser · 1–8 colour · ⌘Z undo
+            P pen · E eraser · S sticker · 1–8 pick · ⌘Z undo
           </p>
         </div>
       </div>

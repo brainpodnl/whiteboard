@@ -3,6 +3,8 @@ import { join } from "path";
 import { Pool } from "pg";
 import { parse, toClientConfig } from "pg-connection-string";
 import {
+  KIND_INK,
+  KIND_STICKER,
   MAX_POINTS_PER_STROKE,
   MAX_STROKES_PER_BOARD,
   OP_BEGIN,
@@ -10,6 +12,7 @@ import {
   OP_END,
   OP_POINTS,
   OP_RESTORE,
+  OP_STAMP,
 } from "../shared/constants";
 import {
   encodeSnapshot,
@@ -33,6 +36,7 @@ const MAX_POINT_BYTES = MAX_POINTS_PER_STROKE * 4;
 type StrokeRow = {
   stroke_id: string;
   author: number;
+  kind: number;
   color: number;
   width: number;
   points: Buffer;
@@ -45,7 +49,14 @@ export type SnapshotRow = { lastOpId: string; payload: Buffer };
 export type BoardRows = { lastOpId: string; strokes: StoredStroke[] };
 
 type Pending = {
-  begin: { author: number; color: number; width: number; x: number; y: number } | null;
+  begin: {
+    author: number;
+    kind: number;
+    color: number;
+    width: number;
+    x: number;
+    y: number;
+  } | null;
   /** Absolute index within the stroke of the first point in `pts`. */
   base: number;
   pts: number[];
@@ -143,7 +154,7 @@ export class Database {
         [board],
       );
       const rows = await client.query<StrokeRow>(
-        `select stroke_id, author, color, width, points, complete, deleted
+        `select stroke_id, author, kind, color, width, points, complete, deleted
            from strokes
           where board_id = $1 and not deleted
           order by seq desc
@@ -197,13 +208,14 @@ export class Database {
       for (const [stroke, pending] of fold(ops)) {
         if (pending.begin) {
           await client.query(
-            `insert into strokes (board_id, stroke_id, author, color, width, points)
-             values ($1, $2, $3, $4, $5, $6)
+            `insert into strokes (board_id, stroke_id, author, kind, color, width, points)
+             values ($1, $2, $3, $4, $5, $6, $7)
              on conflict (board_id, stroke_id) do nothing`,
             [
               board,
               stroke,
               pending.begin.author,
+              pending.begin.kind,
               pending.begin.color,
               pending.begin.width,
               packPoints([pending.begin.x, pending.begin.y]),
@@ -272,7 +284,7 @@ export class Database {
       );
       const lastOpId = cursor.rows[0]?.last_op_id ?? EMPTY_CURSOR;
       const rows = await client.query<StrokeRow>(
-        `select stroke_id, author, color, width, points, complete, deleted
+        `select stroke_id, author, kind, color, width, points, complete, deleted
            from strokes
           where board_id = $1 and not deleted
           order by seq desc
@@ -321,6 +333,7 @@ function toStoredStroke(row: StrokeRow): StoredStroke {
   return {
     id: Number(row.stroke_id),
     author: row.author,
+    kind: row.kind,
     color: row.color,
     width: row.width,
     complete: row.complete,
@@ -353,11 +366,25 @@ function fold(ops: Op[]): Map<number, Pending> {
         if (!entry.begin) {
           entry.begin = {
             author: op.author,
+            kind: KIND_INK,
             color: op.color,
             width: op.width,
             x: op.x,
             y: op.y,
           };
+        }
+        break;
+      case OP_STAMP:
+        if (!entry.begin) {
+          entry.begin = {
+            author: op.author,
+            kind: KIND_STICKER,
+            color: op.sticker,
+            width: op.size,
+            x: op.x,
+            y: op.y,
+          };
+          entry.complete = true;
         }
         break;
       case OP_POINTS: {

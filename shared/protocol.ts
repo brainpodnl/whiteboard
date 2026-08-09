@@ -3,17 +3,26 @@ import {
   FRAME_CURSORS,
   FRAME_OPS,
   FRAME_SNAPSHOT,
+  KIND_STICKER,
   MAX_POINTS_PER_STROKE,
   OP_BEGIN,
   OP_DELETE,
   OP_END,
   OP_POINTS,
   OP_RESTORE,
+  OP_STAMP,
+  STICKER_SIZES,
+  STICKERS,
   WORLD_H,
   WORLD_W,
 } from "./constants";
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * 2 added the kind byte to snapshot entries. A replica holding a version 1
+ * snapshot row rejects it and rebuilds that board from the strokes table, so a
+ * rolling deploy costs one extra read per board rather than a wrong picture.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /**
  * A stroke id carries its author in the high 16 bits, so a client can mint one
@@ -50,17 +59,52 @@ export type Op =
   | { t: typeof OP_POINTS; stroke: number; from: number; pts: number[] }
   | { t: typeof OP_END; stroke: number }
   | { t: typeof OP_DELETE; stroke: number }
-  | { t: typeof OP_RESTORE; stroke: number };
+  | { t: typeof OP_RESTORE; stroke: number }
+  /**
+   * A sticker lands whole, so it carries no `end` and gains no points. It rides
+   * the same id space and the same stream as ink, which is what lets erase,
+   * restore, undo and the z-order treat the two the same way.
+   */
+  | {
+      t: typeof OP_STAMP;
+      stroke: number;
+      author: number;
+      sticker: number;
+      size: number;
+      x: number;
+      y: number;
+    };
 
+/**
+ * Ink and stickers share one record because everything downstream — z-order,
+ * erasing, eviction, the packed snapshot, the strokes table — only ever needs
+ * to tell them apart at the point of drawing. `color` and `width` are the two
+ * byte-wide parameters: for ink they index the palette and WIDTHS, for a
+ * sticker they index STICKERS and STICKER_SIZES. Read them through
+ * `stickerGlyph` and `stickerSize` rather than by hand.
+ */
 export type Stroke = {
   id: number;
   author: number;
+  kind: number;
   color: number;
   width: number;
   complete: boolean;
-  /** Flat x,y pairs in world units. */
+  /** Flat x,y pairs in world units. A sticker holds exactly one pair. */
   pts: number[];
 };
+
+export function isSticker(stroke: Stroke): boolean {
+  return stroke.kind === KIND_STICKER;
+}
+
+export function stickerGlyph(index: number): string {
+  return STICKERS[index] ?? STICKERS[0];
+}
+
+export function stickerSize(index: number): number {
+  return STICKER_SIZES[index] ?? STICKER_SIZES[0];
+}
 
 export type CursorWire = {
   author: number;
@@ -83,6 +127,7 @@ export type ClientMessage =
    */
   | { t: "pts"; stroke: number; from: number; p: number[] }
   | { t: "end"; stroke: number }
+  | { t: "stamp"; stroke: number; sticker: number; size: number; x: number; y: number }
   | { t: "erase"; strokes: number[] }
   | { t: "restore"; strokes: number[] }
   | { t: "cursor"; x: number; y: number; drawing: boolean }
@@ -117,6 +162,7 @@ export function clampY(value: number): number {
 function opBytes(op: Op): number {
   switch (op.t) {
     case OP_BEGIN:
+    case OP_STAMP:
       return 13;
     case OP_POINTS:
       return 9 + (op.pts.length >> 1) * 4;
@@ -134,6 +180,13 @@ function writeOp(view: DataView, at: number, op: Op): number {
       view.setUint16(at + 5, op.author & 0xffff, true);
       view.setUint8(at + 7, op.color & 0xff);
       view.setUint8(at + 8, op.width & 0xff);
+      view.setUint16(at + 9, clampX(op.x), true);
+      view.setUint16(at + 11, clampY(op.y), true);
+      return at + 13;
+    case OP_STAMP:
+      view.setUint16(at + 5, op.author & 0xffff, true);
+      view.setUint8(at + 7, op.sticker & 0xff);
+      view.setUint8(at + 8, op.size & 0xff);
       view.setUint16(at + 9, clampX(op.x), true);
       view.setUint16(at + 11, clampY(op.y), true);
       return at + 13;
@@ -167,6 +220,19 @@ function readOp(view: DataView, at: number): { op: Op; next: number } {
           author: view.getUint16(at + 5, true),
           color: view.getUint8(at + 7),
           width: view.getUint8(at + 8),
+          x: view.getUint16(at + 9, true),
+          y: view.getUint16(at + 11, true),
+        },
+        next: at + 13,
+      };
+    case OP_STAMP:
+      return {
+        op: {
+          t: OP_STAMP,
+          stroke,
+          author: view.getUint16(at + 5, true),
+          sticker: view.getUint8(at + 7),
+          size: view.getUint8(at + 8),
           x: view.getUint16(at + 9, true),
           y: view.getUint16(at + 11, true),
         },
@@ -225,7 +291,7 @@ export function encodeOps(ops: Op[]): Uint8Array {
 export function encodeSnapshot(strokes: Iterable<Stroke>): Uint8Array {
   const list = [...strokes];
   let size = 6;
-  for (const stroke of list) size += 11 + (stroke.pts.length >> 1) * 4;
+  for (const stroke of list) size += 12 + (stroke.pts.length >> 1) * 4;
 
   const buffer = new ArrayBuffer(size);
   const view = new DataView(buffer);
@@ -241,8 +307,9 @@ export function encodeSnapshot(strokes: Iterable<Stroke>): Uint8Array {
     view.setUint8(at + 6, stroke.color & 0xff);
     view.setUint8(at + 7, stroke.width & 0xff);
     view.setUint8(at + 8, stroke.complete ? 1 : 0);
-    view.setUint16(at + 9, count, true);
-    at += 11;
+    view.setUint8(at + 9, stroke.kind & 0xff);
+    view.setUint16(at + 10, count, true);
+    at += 12;
     for (let i = 0; i < count; i++) {
       view.setUint16(at, stroke.pts[i * 2], true);
       view.setUint16(at + 2, stroke.pts[i * 2 + 1], true);
@@ -304,15 +371,16 @@ export function decodeFrame(data: ArrayBuffer): Frame | null {
       const color = view.getUint8(at + 6);
       const width = view.getUint8(at + 7);
       const complete = view.getUint8(at + 8) === 1;
-      const points = view.getUint16(at + 9, true);
-      at += 11;
+      const kind = view.getUint8(at + 9);
+      const points = view.getUint16(at + 10, true);
+      at += 12;
       const pts = new Array<number>(points * 2);
       for (let p = 0; p < points; p++) {
         pts[p * 2] = view.getUint16(at, true);
         pts[p * 2 + 1] = view.getUint16(at + 2, true);
         at += 4;
       }
-      strokes.push({ id, author, color, width, complete, pts });
+      strokes.push({ id, author, kind, color, width, complete, pts });
     }
     return { kind: FRAME_SNAPSHOT, strokes };
   }

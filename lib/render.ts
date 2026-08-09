@@ -1,5 +1,5 @@
 import { WIDTHS, WORLD_H, WORLD_W } from "@/shared/constants";
-import type { Stroke } from "@/shared/protocol";
+import { isSticker, stickerGlyph, stickerSize, type Stroke } from "@/shared/protocol";
 import { PALETTE, userColor } from "@/lib/palette";
 
 /**
@@ -18,6 +18,10 @@ const SETTLE_POINTS = 192;
 const GRID_STEP = 240;
 const TAU = Math.PI * 2;
 const SURFACE = "#111009";
+
+/** Whichever of these the platform has is the one that draws colour emoji. */
+const EMOJI_STACK =
+  '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","Twemoji Mozilla",sans-serif';
 
 export type Viewport = {
   scale: number;
@@ -42,6 +46,8 @@ export type LocalCursor = {
   color: number;
   radius: number;
   eraser: boolean;
+  /** Set while the sticker tool is armed: what a click would drop, and how big. */
+  sticker: { index: number; size: number } | null;
 };
 
 /** The whole world, letterboxed into the viewport. There is no pan and no zoom. */
@@ -219,6 +225,13 @@ export class Renderer {
     this.dirty = true;
   }
 
+  /** A sticker arrives whole, so it goes straight into the committed layer. */
+  stamp(stroke: Stroke): void {
+    this.sticker(this.baked, stroke);
+    this.complete.push(stroke);
+    this.dirty = true;
+  }
+
   setCursors(cursors: RemoteCursor[]): void {
     this.cursors = cursors;
     this.dirty = true;
@@ -277,6 +290,16 @@ export class Renderer {
     let open = false;
 
     for (const stroke of this.complete) {
+      if (isSticker(stroke)) {
+        if (open) {
+          ctx.stroke();
+          open = false;
+        }
+        this.sticker(ctx, stroke);
+        color = -1;
+        continue;
+      }
+
       if (stroke.pts.length < 4) {
         if (open) {
           ctx.stroke();
@@ -390,6 +413,17 @@ export class Renderer {
 
     const x = ox + local.x * scale;
     const y = oy + local.y * scale;
+
+    if (local.sticker) {
+      ctx.globalAlpha = 0.6;
+      ctx.font = `${stickerSize(local.sticker.size) * scale}px ${EMOJI_STACK}`;
+      ctx.textAlign = "center";
+      ctx.fillText(stickerGlyph(local.sticker.index), x, y);
+      ctx.textAlign = "start";
+      ctx.globalAlpha = 1;
+      return;
+    }
+
     ctx.beginPath();
     ctx.arc(x, y, Math.max(3, local.radius * scale), 0, TAU);
     ctx.strokeStyle = local.eraser ? PALETTE.bone : userColor(local.color);
@@ -410,6 +444,18 @@ export class Renderer {
     ctx.strokeStyle = userColor(stroke.color);
     ctx.lineWidth = this.lineWidth(stroke.width);
     ctx.stroke(path);
+  }
+
+  private sticker(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
+    if (stroke.pts.length < 2) return;
+    const size = stickerSize(stroke.width);
+    this.world(ctx);
+    ctx.font = `${size}px ${EMOJI_STACK}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(stickerGlyph(stroke.color), stroke.pts[0], stroke.pts[1]);
+    ctx.textAlign = "start";
+    ctx.textBaseline = "alphabetic";
   }
 
   private dot(ctx: CanvasRenderingContext2D, stroke: Stroke): void {

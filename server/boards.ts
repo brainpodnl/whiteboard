@@ -1,4 +1,6 @@
 import {
+  KIND_INK,
+  KIND_STICKER,
   MAX_POINTS_PER_STROKE,
   MAX_STROKES_PER_BOARD,
   OP_BEGIN,
@@ -6,6 +8,7 @@ import {
   OP_END,
   OP_POINTS,
   OP_RESTORE,
+  OP_STAMP,
 } from "../shared/constants";
 import { encodeSnapshot, pointsTail, type Op, type Stroke } from "../shared/protocol";
 
@@ -68,9 +71,26 @@ export class BoardState {
         this.strokes.set(op.stroke, {
           id: op.stroke,
           author: op.author,
+          kind: KIND_INK,
           color: op.color,
           width: op.width,
           complete: false,
+          deleted: false,
+          pts: [op.x, op.y],
+        });
+        this.live++;
+        return true;
+      }
+      case OP_STAMP: {
+        if (this.strokes.has(op.stroke)) return false;
+        this.evict();
+        this.strokes.set(op.stroke, {
+          id: op.stroke,
+          author: op.author,
+          kind: KIND_STICKER,
+          color: op.sticker,
+          width: op.size,
+          complete: true,
           deleted: false,
           pts: [op.x, op.y],
         });

@@ -1,13 +1,23 @@
 import {
+  KIND_INK,
+  KIND_STICKER,
   MAX_POINTS_PER_STROKE,
   OP_BEGIN,
   OP_DELETE,
   OP_END,
   OP_POINTS,
   OP_RESTORE,
+  OP_STAMP,
   WIDTHS,
 } from "@/shared/constants";
-import { pointsTail, strokeAuthor, type Op, type Stroke } from "@/shared/protocol";
+import {
+  isSticker,
+  pointsTail,
+  stickerSize,
+  strokeAuthor,
+  type Op,
+  type Stroke,
+} from "@/shared/protocol";
 
 /**
  * What the painter has to do about a change. `rebake` supersedes every other
@@ -18,7 +28,8 @@ export type BoardChange =
   | { kind: "rebake" }
   | { kind: "begin"; stroke: Stroke }
   | { kind: "points"; stroke: Stroke }
-  | { kind: "end"; stroke: Stroke };
+  | { kind: "end"; stroke: Stroke }
+  | { kind: "stamp"; stroke: Stroke };
 
 /** What an undo or a redo asks the server to do. */
 export type Intent = { kind: "erase" | "restore"; strokes: number[] };
@@ -127,6 +138,7 @@ export class Board {
           const stroke: Stroke = {
             id: op.stroke,
             author: op.author,
+            kind: KIND_INK,
             color: op.color,
             width: op.width,
             complete: false,
@@ -134,6 +146,23 @@ export class Board {
           };
           this.insert(stroke);
           changes.push({ kind: "begin", stroke });
+          break;
+        }
+
+        case OP_STAMP: {
+          this.unacked.delete(op.stroke);
+          if (this.mine.has(op.stroke) || this.strokeMap.has(op.stroke)) break;
+          const stroke: Stroke = {
+            id: op.stroke,
+            author: op.author,
+            kind: KIND_STICKER,
+            color: op.sticker,
+            width: op.size,
+            complete: true,
+            pts: [op.x, op.y],
+          };
+          this.insert(stroke);
+          changes.push({ kind: "stamp", stroke });
           break;
         }
 
@@ -183,10 +212,43 @@ export class Board {
     x: number,
     y: number,
   ): Stroke {
-    const stroke: Stroke = { id, author, color, width, complete: false, pts: [x, y] };
+    const stroke: Stroke = {
+      id,
+      author,
+      kind: KIND_INK,
+      color,
+      width,
+      complete: false,
+      pts: [x, y],
+    };
     this.mine.add(id);
     this.unacked.add(id);
     this.insert(stroke);
+    return stroke;
+  }
+
+  /** A sticker has no drag, so it is placed and filed as one undoable step. */
+  stampLocal(
+    id: number,
+    author: number,
+    sticker: number,
+    size: number,
+    x: number,
+    y: number,
+  ): Stroke {
+    const stroke: Stroke = {
+      id,
+      author,
+      kind: KIND_STICKER,
+      color: sticker,
+      width: size,
+      complete: true,
+      pts: [x, y],
+    };
+    this.mine.add(id);
+    this.unacked.add(id);
+    this.insert(stroke);
+    this.remember({ drew: true, strokes: [id] });
     return stroke;
   }
 
@@ -259,7 +321,13 @@ export class Board {
     const highY = Math.max(ay, by);
 
     for (const stroke of this.strokeMap.values()) {
-      const reach = radius + (WIDTHS[stroke.width] ?? WIDTHS[0]) / 2;
+      // A sticker is a glyph, not a path, so the eraser treats it as a disc the
+      // size of the one it draws rather than as a hairline at its anchor.
+      const reach =
+        radius +
+        (isSticker(stroke)
+          ? stickerSize(stroke.width) / 2
+          : (WIDTHS[stroke.width] ?? WIDTHS[0]) / 2);
       const box = this.bounds(stroke);
       if (
         highX < box.x0 - reach ||

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Eraser, Pen, Redo2, Undo2 } from "lucide-react";
-import { COLOR_COUNT, WIDTHS } from "@/shared/constants";
+import { Eraser, Pen, Redo2, Smile, Undo2 } from "lucide-react";
+import { COLOR_COUNT, STICKERS, WIDTHS } from "@/shared/constants";
 import { USER_COLORS, userColor } from "@/lib/palette";
 import { cn } from "@/lib/utils";
 import type { Tool } from "@/components/Canvas";
@@ -11,11 +11,13 @@ type Props = {
   tool: Tool;
   color: number;
   width: number;
+  sticker: number;
   canUndo: boolean;
   canRedo: boolean;
   onTool: (tool: Tool) => void;
   onColor: (color: number) => void;
   onWidth: (width: number) => void;
+  onSticker: (sticker: number) => void;
   onUndo: () => void;
   onRedo: () => void;
   className?: string;
@@ -26,11 +28,13 @@ export default function Toolbar(props: Props) {
     tool,
     color,
     width,
+    sticker,
     canUndo,
     canRedo,
     onTool,
     onColor,
     onWidth,
+    onSticker,
     onUndo,
     onRedo,
     className,
@@ -64,9 +68,17 @@ export default function Toolbar(props: Props) {
 
       if (event.key === "e" || event.key === "E") api.onTool("eraser");
       else if (event.key === "p" || event.key === "P") api.onTool("pen");
+      else if (event.key === "s" || event.key === "S") api.onTool("sticker");
       else if (event.key >= "1" && event.key <= "8") {
-        api.onColor(Number(event.key) - 1);
-        api.onTool("pen");
+        // The digits address whichever row is on screen, so arming stickers and
+        // pressing 3 picks the third sticker rather than silently recolouring
+        // the pen behind the picker.
+        if (api.tool === "sticker") {
+          api.onSticker(Number(event.key) - 1);
+        } else {
+          api.onColor(Number(event.key) - 1);
+          api.onTool("pen");
+        }
       }
     };
 
@@ -81,8 +93,29 @@ export default function Toolbar(props: Props) {
         className,
       )}
     >
-      <div role="radiogroup" aria-label="Ink colour" className="flex items-center gap-1">
-        {USER_COLORS.slice(0, COLOR_COUNT).map((swatch, index) => {
+      {tool === "sticker" ? (
+        <div role="radiogroup" aria-label="Sticker" className="flex items-center gap-0.5">
+          {STICKERS.map((glyph, index) => (
+            <button
+              key={glyph}
+              type="button"
+              role="radio"
+              aria-checked={index === sticker}
+              aria-label={`Sticker ${glyph}`}
+              title={`${glyph} (${index + 1})`}
+              onClick={() => onSticker(index)}
+              className={cn(
+                "grid size-8 place-items-center rounded-full text-[15px] leading-none transition-all outline-none focus-visible:ring-2 focus-visible:ring-beam/60",
+                index === sticker ? "scale-110 bg-panel" : "opacity-70 hover:opacity-100",
+              )}
+            >
+              {glyph}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div role="radiogroup" aria-label="Ink colour" className="flex items-center gap-1">
+          {USER_COLORS.slice(0, COLOR_COUNT).map((swatch, index) => {
           const active = index === color && tool === "pen";
           return (
             <button
@@ -107,12 +140,17 @@ export default function Toolbar(props: Props) {
               />
             </button>
           );
-        })}
-      </div>
+          })}
+        </div>
+      )}
 
       <Divider />
 
-      <div role="radiogroup" aria-label="Stroke width" className="flex items-center gap-0.5">
+      <div
+        role="radiogroup"
+        aria-label={tool === "sticker" ? "Sticker size" : "Stroke width"}
+        className="flex items-center gap-0.5"
+      >
         {WIDTHS.map((value, index) => {
           const active = index === width;
           return (
@@ -121,7 +159,7 @@ export default function Toolbar(props: Props) {
               type="button"
               role="radio"
               aria-checked={active}
-              aria-label={`Width ${value}`}
+              aria-label={tool === "sticker" ? `Size ${index + 1}` : `Width ${value}`}
               onClick={() => onWidth(index)}
               className={cn(
                 "grid size-8 place-items-center rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-beam/60",
@@ -159,6 +197,14 @@ export default function Toolbar(props: Props) {
           onClick={() => onTool("eraser")}
         >
           <Eraser className="size-4" />
+        </Tile>
+        <Tile
+          label="Sticker"
+          hint="S"
+          active={tool === "sticker"}
+          onClick={() => onTool("sticker")}
+        >
+          <Smile className="size-4" />
         </Tile>
       </div>
 

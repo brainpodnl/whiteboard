@@ -7,6 +7,7 @@ import {
   OP_BEGIN,
   OP_END,
   OP_POINTS,
+  OP_STAMP,
   POINT_FLUSH_MS,
 } from "@/shared/constants";
 import {
@@ -52,6 +53,8 @@ export type Identity = { session: string; name: string; color: number };
  * so a batch lost with a dying replica is re-sent rather than assumed landed.
  */
 type Pending = {
+  /** A sticker: one message, no points and no end, but the same replay rules. */
+  stamp: boolean;
   color: number;
   width: number;
   pts: number[];
@@ -123,6 +126,7 @@ export class Net {
 
   begin(stroke: number, color: number, width: number, x: number, y: number): void {
     this.pending.set(stroke, {
+      stamp: false,
       color,
       width,
       pts: [x, y],
@@ -132,6 +136,23 @@ export class Net {
       beginAcked: false,
       ended: false,
       endSent: false,
+      endAcked: false,
+    });
+    this.flush();
+  }
+
+  stamp(stroke: number, sticker: number, size: number, x: number, y: number): void {
+    this.pending.set(stroke, {
+      stamp: true,
+      color: sticker,
+      width: size,
+      pts: [x, y],
+      sent: 1,
+      acked: 1,
+      beginSent: false,
+      beginAcked: false,
+      ended: true,
+      endSent: true,
       endAcked: false,
     });
     this.flush();
@@ -230,17 +251,30 @@ export class Net {
 
     for (const [stroke, entry] of this.pending) {
       if (!entry.beginSent) {
-        this.send({
-          t: "begin",
-          stroke,
-          color: entry.color,
-          width: entry.width,
-          x: entry.pts[0],
-          y: entry.pts[1],
-        });
+        this.send(
+          entry.stamp
+            ? {
+                t: "stamp",
+                stroke,
+                sticker: entry.color,
+                size: entry.width,
+                x: entry.pts[0],
+                y: entry.pts[1],
+              }
+            : {
+                t: "begin",
+                stroke,
+                color: entry.color,
+                width: entry.width,
+                x: entry.pts[0],
+                y: entry.pts[1],
+              },
+        );
         entry.beginSent = true;
         if (entry.sent < 1) entry.sent = 1;
       }
+
+      if (entry.stamp) continue;
 
       const total = entry.pts.length >> 1;
       while (entry.sent < total) {
@@ -350,7 +384,11 @@ export class Net {
       const entry = this.pending.get(op.stroke);
       if (!entry) continue;
 
-      if (op.t === OP_BEGIN) {
+      if (op.t === OP_STAMP) {
+        entry.beginAcked = true;
+        entry.endAcked = true;
+        entry.acked = 1;
+      } else if (op.t === OP_BEGIN) {
         entry.beginAcked = true;
         if (entry.acked < 1) entry.acked = 1;
       } else if (op.t === OP_POINTS) {

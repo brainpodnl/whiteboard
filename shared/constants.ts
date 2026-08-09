@@ -27,11 +27,24 @@ export const MAX_STROKES_PER_BOARD = 20_000;
 export const COLOR_COUNT = 8;
 export const WIDTHS = [3, 6, 12, 26] as const;
 
+/**
+ * Stickers are applause, not annotation: the set is deliberately all-positive so
+ * dropping one on someone's work can only ever read as encouragement.
+ */
+export const STICKERS = ["👍", "🎉", "❤️", "⭐", "🔥", "🙌", "✅", "💯"] as const;
+
+/** World units across, indexed by the same control that picks a stroke width. */
+export const STICKER_SIZES = [96, 144, 208, 300] as const;
+
+export const KIND_INK = 0;
+export const KIND_STICKER = 1;
+
 export const OP_BEGIN = 1;
 export const OP_POINTS = 2;
 export const OP_END = 3;
 export const OP_DELETE = 4;
 export const OP_RESTORE = 5;
+export const OP_STAMP = 6;
 
 export const FRAME_SNAPSHOT = 1;
 export const FRAME_OPS = 2;

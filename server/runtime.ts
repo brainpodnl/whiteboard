@@ -19,11 +19,14 @@ import {
   OP_END,
   OP_POINTS,
   OP_RESTORE,
+  OP_STAMP,
   PRESENCE_BEAT_MS,
   PRESENCE_TTL_MS,
   REPLICA_BEAT_MS,
   REPLICA_TTL_MS,
   SNAPSHOT_MS,
+  STICKER_SIZES,
+  STICKERS,
   STREAM_RETAIN_MS,
   WIDTHS,
   boardAuthorMap,
@@ -279,6 +282,9 @@ export class Runtime {
       case "end":
         this.onEnd(session, board, body);
         return;
+      case "stamp":
+        this.onStamp(session, board, body);
+        return;
       case "erase":
         this.onErase(session, board, body, true);
         return;
@@ -433,6 +439,28 @@ export class Runtime {
 
     if (draft) draft.complete = true;
     this.publish(board, { t: OP_END, stroke });
+  }
+
+  /**
+   * A sticker is one op with no follow-up, so unlike a stroke there is no draft
+   * to carry: a replay after a failover finds the id already on the board and
+   * stops there, which is what keeps a reconnect from stamping twice.
+   */
+  private onStamp(session: Session, board: BoardRuntime, body: Record<string, unknown>): void {
+    const stroke = strokeId(body.stroke);
+    if (stroke === null || strokeAuthor(stroke) !== session.author) return;
+
+    const sticker = Number(body.sticker);
+    const size = Number(body.size);
+    const x = coordinate(body.x);
+    const y = coordinate(body.y);
+    if (x === null || y === null) return;
+    if (!Number.isInteger(sticker) || sticker < 0 || sticker >= STICKERS.length) return;
+    if (!Number.isInteger(size) || size < 0 || size >= STICKER_SIZES.length) return;
+    if (!this.charge(session, 1)) return;
+    if (board.state.has(stroke)) return;
+
+    this.publish(board, { t: OP_STAMP, stroke, author: session.author, sticker, size, x, y });
   }
 
   private onErase(
