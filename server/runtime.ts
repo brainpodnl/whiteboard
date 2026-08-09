@@ -448,7 +448,9 @@ export class Runtime {
       const stroke = strokeId(value);
       if (stroke === null) continue;
       if (!board.state.has(stroke)) continue;
-      if (board.state.isDeleted(stroke) !== erase) continue;
+      // Already in the state being asked for: a replayed erase after a failover
+      // is a no-op rather than a second op on the stream.
+      if (board.state.isDeleted(stroke) === erase) continue;
       if (!this.chargeErase(session)) return;
       this.publish(board, { t: erase ? OP_DELETE : OP_RESTORE, stroke });
     }
