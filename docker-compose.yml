@@ -1,0 +1,88 @@
+name: brainpod-whiteboard
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: whiteboard
+      POSTGRES_PASSWORD: whiteboard
+      POSTGRES_DB: whiteboard
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whiteboard -d whiteboard"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${VALKEY_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # Two replicas of the same image behind a load balancer. One of them holds the
+  # Valkey lease and does the durable work; both are equal WebSocket gateways.
+  # Stop either one mid-stroke and the line keeps going.
+  app-a:
+    profiles: ["cluster"]
+    build:
+      context: .
+      args:
+        RELEASE_ID: ${RELEASE_ID:-local-1}
+    environment:
+      DATABASE_URL: postgres://whiteboard:whiteboard@postgres:5432/whiteboard
+      REDIS_URL: redis://valkey:6379
+      POD_ID: pod-a
+      RELEASE_ID: ${RELEASE_ID:-local-1}
+      REGION: eu-west-1
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    stop_grace_period: 15s
+
+  app-b:
+    profiles: ["cluster"]
+    build:
+      context: .
+      args:
+        RELEASE_ID: ${RELEASE_ID:-local-1}
+    environment:
+      DATABASE_URL: postgres://whiteboard:whiteboard@postgres:5432/whiteboard
+      REDIS_URL: redis://valkey:6379
+      POD_ID: pod-b
+      RELEASE_ID: ${RELEASE_ID:-local-1}
+      REGION: eu-west-1
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    stop_grace_period: 15s
+
+  edge:
+    profiles: ["cluster"]
+    image: caddy:2-alpine
+    ports:
+      - "${EDGE_PORT:-3000}:3000"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - app-a
+      - app-b
+
+volumes:
+  pgdata:
