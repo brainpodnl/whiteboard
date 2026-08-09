@@ -1,7 +1,8 @@
 /**
  * One fixed board for everyone. There is no pan or zoom: what you draw lands in
  * the same place on every screen in the room, which is the whole point of the
- * demo. The canvas letterboxes this rectangle to fit.
+ * demo. The canvas fills the viewport with this rectangle, cropping whichever
+ * axis does not match rather than leaving a letterbox.
  */
 export const WORLD_W = 3840;
 export const WORLD_H = 2160;

@@ -50,9 +50,19 @@ export type LocalCursor = {
   sticker: { index: number; size: number } | null;
 };
 
-/** The whole world, letterboxed into the viewport. There is no pan and no zoom. */
+/**
+ * The world fills the viewport, cropped on its longer axis rather than
+ * letterboxed. There is no pan and no zoom, so a point on the board is still
+ * the same point on every screen — a window that is not 16:9 simply keeps the
+ * far edges out of frame.
+ *
+ * Filling matters beyond looks: a letterbox is a strip where the pointer maps
+ * to a clamped world position, so the drawn cursor jams against the board edge
+ * while the real one keeps moving, and the canvas hides the system cursor.
+ * Reaching for the toolbar crossed that strip.
+ */
 export function fitViewport(width: number, height: number): Viewport {
-  const scale = Math.min(width / WORLD_W, height / WORLD_H);
+  const scale = Math.max(width / WORLD_W, height / WORLD_H);
   return {
     scale,
     ox: (width - WORLD_W * scale) / 2,
