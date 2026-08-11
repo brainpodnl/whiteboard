@@ -19,6 +19,14 @@ const GRID_STEP = 240;
 const TAU = Math.PI * 2;
 const SURFACE = "#111009";
 
+/**
+ * How long the camera must hold still before the committed layer is painted
+ * again at the new zoom. Repainting every stroke per frame is what a pan cannot
+ * afford, so a gesture rides on the existing bitmap, stretched, and pays for
+ * sharpness once it stops.
+ */
+const SETTLE_MS = 90;
+
 /** Whichever of these the platform has is the one that draws colour emoji. */
 const EMOJI_STACK =
   '"Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji","Twemoji Mozilla",sans-serif';
@@ -50,38 +58,68 @@ export type LocalCursor = {
   sticker: { index: number; size: number } | null;
 };
 
-/**
- * The world fills the viewport, cropped on its longer axis rather than
- * letterboxed. There is no pan and no zoom, so a point on the board is still
- * the same point on every screen — a window that is not 16:9 simply keeps the
- * far edges out of frame.
- *
- * Filling matters beyond looks: a letterbox is a strip where the pointer maps
- * to a clamped world position, so the drawn cursor jams against the board edge
- * while the real one keeps moving, and the canvas hides the system cursor.
- * Reaching for the toolbar crossed that strip.
- */
+/** The board filling the viewport, cropped rather than letterboxed. The view a tab opens on. */
 export function fitViewport(width: number, height: number): Viewport {
-  const scale = Math.max(width / WORLD_W, height / WORLD_H);
+  const scale = coverScale(width, height);
+  return settleViewport(...centred(scale, width, height), width, height);
+}
+
+/** The camera that puts the middle of the board in the middle of the window. */
+function centred(scale: number, width: number, height: number): [number, number, number] {
+  return [scale, (width - WORLD_W * scale) / 2, (height - WORLD_H * scale) / 2];
+}
+
+export function coverScale(width: number, height: number): number {
+  return Math.max(width / WORLD_W, height / WORLD_H);
+}
+
+/** Zoomed out far enough to hold the whole board, with room to spare around it. */
+export function minScale(width: number, height: number): number {
+  return Math.min(width / WORLD_W, height / WORLD_H) * 0.6;
+}
+
+export function maxScale(width: number, height: number): number {
+  return coverScale(width, height) * 14;
+}
+
+/**
+ * Settles a camera against the viewport: the zoom is bounded, and on each axis
+ * the board is centred when it is smaller than the window and otherwise pinned
+ * so its edge cannot be dragged inside the frame. Panning therefore never
+ * strands the board off screen, and never opens a margin it does not have to.
+ */
+export function settleViewport(
+  scale: number,
+  ox: number,
+  oy: number,
+  width: number,
+  height: number,
+): Viewport {
+  const bounded = clamp(scale, minScale(width, height), maxScale(width, height));
+  const spanX = WORLD_W * bounded;
+  const spanY = WORLD_H * bounded;
+
   return {
-    scale,
-    ox: (width - WORLD_W * scale) / 2,
-    oy: (height - WORLD_H * scale) / 2,
+    scale: bounded,
+    ox: spanX <= width ? (width - spanX) / 2 : clamp(ox, width - spanX, 0),
+    oy: spanY <= height ? (height - spanY) / 2 : clamp(oy, height - spanY, 0),
     width,
     height,
   };
 }
 
+/**
+ * Screen to world, deliberately unclamped: past the edge of the board there is
+ * still somewhere to point, and a cursor that stops following the hand reads as
+ * a broken window rather than a boundary. Callers clamp when they commit a point.
+ */
 export function toWorld(
   view: Viewport,
   x: number,
   y: number,
 ): { x: number; y: number } {
   if (view.scale <= 0) return { x: 0, y: 0 };
-  return {
-    x: clamp((x - view.ox) / view.scale, 0, WORLD_W - 1),
-    y: clamp((y - view.oy) / view.scale, 0, WORLD_H - 1),
-  };
+  return { x: (x - view.ox) / view.scale, y: (y - view.oy) / view.scale };
 }
 
 type Live = {
@@ -105,6 +143,9 @@ export class Renderer {
   private local: LocalCursor | null = null;
 
   private view: Viewport = fitViewport(0, 0);
+  /** The camera the committed layer was painted for; null until the first bake. */
+  private bakedView: Viewport | null = null;
+  private movedAt = 0;
   private dpr = 1;
   private pixelWidth = 0;
   private pixelHeight = 0;
@@ -130,6 +171,38 @@ export class Renderer {
     return this.view;
   }
 
+  /** Moves the camera, bounded so the board can never be stranded off screen. */
+  setView(scale: number, ox: number, oy: number): void {
+    const next = settleViewport(scale, ox, oy, this.view.width, this.view.height);
+    if (
+      next.scale === this.view.scale &&
+      next.ox === this.view.ox &&
+      next.oy === this.view.oy
+    ) {
+      return;
+    }
+    this.view = next;
+    this.movedAt = performance.now();
+    this.dirty = true;
+  }
+
+  panBy(dx: number, dy: number): void {
+    this.setView(this.view.scale, this.view.ox + dx, this.view.oy + dy);
+  }
+
+  /** Zooms about a screen point, so whatever is under the pointer stays under it. */
+  zoomAt(x: number, y: number, factor: number): void {
+    const { width, height, scale, ox, oy } = this.view;
+    const next = clamp(scale * factor, minScale(width, height), maxScale(width, height));
+    const k = next / scale;
+    this.setView(next, x - (x - ox) * k, y - (y - oy) * k);
+  }
+
+  resetView(): void {
+    const { width, height } = this.view;
+    this.setView(...centred(coverScale(width, height), width, height));
+  }
+
   setMono(family: string): void {
     this.mono = family || "monospace";
     this.dirty = true;
@@ -153,7 +226,10 @@ export class Renderer {
     this.canvas.height = pixelHeight;
     this.bake.width = pixelWidth;
     this.bake.height = pixelHeight;
-    this.view = fitViewport(width, height);
+    this.view =
+      this.view.width > 0 && this.view.height > 0
+        ? settleViewport(this.view.scale, this.view.ox, this.view.oy, width, height)
+        : fitViewport(width, height);
     this.rebake();
   }
 
@@ -257,13 +333,16 @@ export class Renderer {
   }
 
   draw(): void {
-    if (!this.dirty || this.pixelWidth <= 0) return;
+    if (this.pixelWidth <= 0) return;
+
+    if (this.stale() && performance.now() - this.movedAt >= SETTLE_MS) this.rebake();
+    if (!this.dirty) return;
     this.dirty = false;
 
     const ctx = this.ctx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
-    ctx.drawImage(this.bake, 0, 0);
+    this.blit(ctx);
 
     for (const live of this.live.values()) {
       if (live.stroke.pts.length < 4) this.dot(ctx, live.stroke);
@@ -281,8 +360,46 @@ export class Renderer {
     this.bake.height = 0;
   }
 
+  private stale(): boolean {
+    const baked = this.bakedView;
+    return (
+      !!baked &&
+      (baked.scale !== this.view.scale ||
+        baked.ox !== this.view.ox ||
+        baked.oy !== this.view.oy)
+    );
+  }
+
+  /**
+   * Puts the committed layer on screen. While the camera is ahead of the bake,
+   * the bitmap is stretched into place instead of being repainted — the board
+   * softens for a few frames mid-gesture rather than dropping them.
+   */
+  private blit(ctx: CanvasRenderingContext2D): void {
+    const baked = this.bakedView;
+    if (!baked || !this.stale()) {
+      ctx.drawImage(this.bake, 0, 0);
+      return;
+    }
+
+    const k = this.view.scale / baked.scale;
+    ctx.fillStyle = PALETTE.void;
+    ctx.fillRect(0, 0, this.pixelWidth, this.pixelHeight);
+    ctx.setTransform(
+      k,
+      0,
+      0,
+      k,
+      (this.view.ox - baked.ox * k) * this.dpr,
+      (this.view.oy - baked.oy * k) * this.dpr,
+    );
+    ctx.drawImage(this.bake, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
   private rebake(): void {
     const ctx = this.baked;
+    this.bakedView = this.view;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.fillStyle = PALETTE.void;

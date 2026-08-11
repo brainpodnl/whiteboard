@@ -223,7 +223,8 @@ export default function Whiteboard({ board: name }: { board: string }) {
         <div className="flex w-full items-end justify-between gap-3">
           <StatusBadge hud={hud} className="pointer-events-auto" />
           <p className="hud-label hidden lg:block">
-            P pen · E eraser · S sticker · 1–8 pick · ⌘Z undo
+            P pen · E eraser · S sticker · 1–8 pick · space drag or scroll to pan
+            · ⌘scroll zoom · 0 reset · ⌘Z undo
           </p>
         </div>
       </div>

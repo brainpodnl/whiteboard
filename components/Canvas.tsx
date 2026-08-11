@@ -68,7 +68,12 @@ export default function Canvas(props: Props) {
     let painted: RemoteCursor[] | null = null;
     let ordinal = 0;
     let pointer: number | null = null;
-    let gesture: Tool = "pen";
+    let gesture: Tool | "pan" = "pen";
+    let panFrom: { x: number; y: number } | null = null;
+    let spaceHeld = false;
+    /** Live touches, so a second finger can turn a drag into a pinch. */
+    const touches = new Map<number, { x: number; y: number }>();
+    let pinch: { gap: number; x: number; y: number } | null = null;
     let drawing: Stroke | null = null;
     let erased: number[] = [];
     let at = { x: 0, y: 0 };
@@ -85,14 +90,15 @@ export default function Canvas(props: Props) {
     observer.observe(canvas);
     window.addEventListener("orientationchange", resize);
 
-    const world = (event: { clientX: number; clientY: number }) => {
-      const point = toWorld(
-        renderer.viewport,
-        event.clientX - rect.left,
-        event.clientY - rect.top,
-      );
-      return { x: clampX(point.x), y: clampY(point.y) };
-    };
+    /** Where the pointer is, which past the edge of the board is outside it. */
+    const world = (event: { clientX: number; clientY: number }) =>
+      toWorld(renderer.viewport, event.clientX - rect.left, event.clientY - rect.top);
+
+    /** Onto the board, for the points a gesture actually commits. */
+    const pin = (point: { x: number; y: number }) => ({
+      x: clampX(point.x),
+      y: clampY(point.y),
+    });
 
     // Every erase invalidates the committed layer, and a drag can erase on each
     // pointer sample, so the rebake is collapsed onto the next frame.
@@ -108,10 +114,11 @@ export default function Canvas(props: Props) {
       stale = true;
     };
 
-    const start = (point: { x: number; y: number }) => {
+    const start = (raw: { x: number; y: number }) => {
       const net = live.current.net;
       if (!net || net.author === 0) return;
 
+      const point = pin(raw);
       ordinal = Math.max(ordinal, board.nextOrdinal(net.author));
       const id = makeStrokeId(net.author, ordinal++);
       const { color, width } = live.current;
@@ -120,10 +127,11 @@ export default function Canvas(props: Props) {
       net.begin(id, color, width, point.x, point.y);
     };
 
-    const place = (point: { x: number; y: number }) => {
+    const place = (raw: { x: number; y: number }) => {
       const net = live.current.net;
       if (!net || net.author === 0) return;
 
+      const point = pin(raw);
       ordinal = Math.max(ordinal, board.nextOrdinal(net.author));
       const id = makeStrokeId(net.author, ordinal++);
       const { sticker, width } = live.current;
@@ -144,10 +152,31 @@ export default function Canvas(props: Props) {
     };
 
     const onDown = (event: PointerEvent) => {
-      if (!live.current.enabled || pointer !== null) return;
+      if (event.pointerType === "touch") {
+        touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        // A second finger means the hand wants the board, not a line: close
+        // whatever it had started rather than dragging it along the pinch.
+        if (touches.size === 2) {
+          if (drawing) finish();
+          pointer = null;
+          panFrom = null;
+          pinch = null;
+          hover = null;
+          return;
+        }
+      }
+
+      if (!live.current.enabled || pointer !== null || touches.size > 1) return;
       event.preventDefault();
       canvas.setPointerCapture(event.pointerId);
       pointer = event.pointerId;
+
+      if (spaceHeld || event.button === 1) {
+        gesture = "pan";
+        panFrom = { x: event.clientX, y: event.clientY };
+        return;
+      }
+
       gesture = live.current.tool;
 
       const point = world(event);
@@ -159,12 +188,36 @@ export default function Canvas(props: Props) {
     };
 
     const onMove = (event: PointerEvent) => {
+      if (event.pointerType === "touch" && touches.has(event.pointerId)) {
+        touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+        if (touches.size === 2) {
+          event.preventDefault();
+          const [a, b] = [...touches.values()];
+          const gap = Math.hypot(a.x - b.x, a.y - b.y);
+          const x = (a.x + b.x) / 2 - rect.left;
+          const y = (a.y + b.y) / 2 - rect.top;
+
+          if (pinch && pinch.gap > 0) {
+            renderer.panBy(x - pinch.x, y - pinch.y);
+            renderer.zoomAt(x, y, gap / pinch.gap);
+          }
+          pinch = { gap, x, y };
+          return;
+        }
+      }
+
       const point = world(event);
       hover = point;
       renderer.invalidate();
 
       if (event.pointerId !== pointer) return;
       event.preventDefault();
+
+      if (gesture === "pan") {
+        if (panFrom) renderer.panBy(event.clientX - panFrom.x, event.clientY - panFrom.y);
+        panFrom = { x: event.clientX, y: event.clientY };
+        return;
+      }
 
       // Coalesced samples are only populated for trusted events, so anything
       // synthesising input gets an empty list and would draw nothing at all.
@@ -194,7 +247,7 @@ export default function Canvas(props: Props) {
       for (const sample of samples) {
         const stroke = drawing;
         if (!stroke) break;
-        const next = world(sample);
+        const next = pin(world(sample));
 
         // A stroke that hits the wire's length cap is closed and continued from
         // the same point, so a long drag stays one unbroken line on screen.
@@ -215,8 +268,14 @@ export default function Canvas(props: Props) {
     };
 
     const onUp = (event: PointerEvent) => {
+      if (event.pointerType === "touch") {
+        touches.delete(event.pointerId);
+        if (touches.size < 2) pinch = null;
+      }
+
       if (event.pointerId !== pointer) return;
       pointer = null;
+      panFrom = null;
       if (canvas.hasPointerCapture(event.pointerId)) {
         canvas.releasePointerCapture(event.pointerId);
       }
@@ -240,12 +299,57 @@ export default function Canvas(props: Props) {
 
     const onMenu = (event: Event) => event.preventDefault();
 
+    /**
+     * A trackpad reports a pinch as a wheel event with ctrl held, which is the
+     * same shape the browser's own zoom uses — so this has to be preventable,
+     * and the listener cannot be passive.
+     */
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? rect.height : 1;
+
+      if (event.ctrlKey || event.metaKey) {
+        renderer.zoomAt(x, y, Math.exp((-event.deltaY * unit) / 320));
+        return;
+      }
+      renderer.panBy(-event.deltaX * unit, -event.deltaY * unit);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      if (event.key === "0" && !event.metaKey && !event.ctrlKey) {
+        renderer.resetView();
+        return;
+      }
+      if (event.code !== "Space" || event.repeat) return;
+      spaceHeld = true;
+      event.preventDefault();
+    };
+
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "Space") spaceHeld = false;
+    };
+
     canvas.addEventListener("pointerdown", onDown);
     canvas.addEventListener("pointermove", onMove);
     canvas.addEventListener("pointerup", onUp);
     canvas.addEventListener("pointercancel", onUp);
     canvas.addEventListener("pointerleave", onLeave);
     canvas.addEventListener("contextmenu", onMenu);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
 
     let frame = requestAnimationFrame(function loop() {
       frame = requestAnimationFrame(loop);
@@ -304,6 +408,9 @@ export default function Canvas(props: Props) {
       canvas.removeEventListener("pointercancel", onUp);
       canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("contextmenu", onMenu);
+      canvas.removeEventListener("wheel", onWheel);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
       rendererRef.current = null;
       renderer.dispose();
     };

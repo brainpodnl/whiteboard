@@ -34,8 +34,8 @@ export default function Entry({ name: initial, color: initialColor, onStart }: P
         </h1>
 
         <p className="mt-3 text-note text-faint sm:text-sm">
-          One board, no pan and no zoom — what you draw lands in the same place on
-          everyone&rsquo;s screen.
+          One shared board — what you draw lands in the same place on it for
+          everyone. Scroll to pan, pinch to zoom.
         </p>
 
         <Input

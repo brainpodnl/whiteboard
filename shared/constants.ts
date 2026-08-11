@@ -1,8 +1,8 @@
 /**
- * One fixed board for everyone. There is no pan or zoom: what you draw lands in
- * the same place on every screen in the room, which is the whole point of the
- * demo. The canvas fills the viewport with this rectangle, cropping whichever
- * axis does not match rather than leaving a letterbox.
+ * One fixed board for everyone. Every stroke is stored in these coordinates, so
+ * a mark lands in the same place on the board on every screen in the room —
+ * what differs is only how much of the board a window is looking at. A tab
+ * opens filling the viewport and can pan and zoom from there.
  */
 export const WORLD_W = 3840;
 export const WORLD_H = 2160;
