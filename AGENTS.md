@@ -32,11 +32,12 @@ layer and rebuilds the image from the dependency stage down.
 - WebSockets are served at `/ws`, with the board id in the `board` query
   parameter; absent means the default board. The Route has to pass upgrades
   through.
-- `replicas` may be anything from 1 upward. Exactly one replica wins a Valkey
+- The code runs correctly at any replica count. Exactly one replica wins a Valkey
   lease and does the durable work — compacting the op log into Postgres, board
   snapshotting, stream trimming, presence pruning. Every replica, leader
   included, is an equal WebSocket gateway. Scaling either way is safe at any
-  time, and drawing does not stop while the lease is vacant.
+  time, and drawing does not stop while the lease is vacant. What a deploy
+  actually provisions is 1 replica, for the reason under Resources.
 
 ## Resources
 
@@ -46,14 +47,74 @@ resource kind the CLI validates against is `Postgres`. Kinds are PascalCase
 inside a manifest and lowercase as a `resource get` argument, and cross-resource
 URNs take the lowercase form: `urn:brain:disk:default:<name>`.
 
-Instance size gates replica count, which the `App` schema does not say: `.5x`
-rejects any `replicas` above 1 with `VALIDATION_ERROR` "Only 1 replica is
-allowed for this instance". The App therefore needs at least `1x` for the
-leader-and-gateways split to exist at all. `.5x` is fine for both databases.
+### Sizes
+
+Deploy at the floor. Every one of these is the smallest value the API will
+accept, chosen so a clone-and-deploy fits inside a trial account without anyone
+having to think about it:
+
+| Resource | Setting | Floor |
+|---|---|---|
+| `App` | `instance` | `.25x` |
+| `App` | `replicas` | `1` |
+| `Postgres` | `instance` | `.5x` |
+| `Valkey` | `instance` | `.5x` |
+| `Disk` (both) | `size` | `5` |
+
+Confirm rather than trust: `brainpod describe resource app --json` gives
+`instance` an enum of `.25x .5x 1x 2x 4x 8x` and `replicas` a range of 1..10,
+`postgres` and `valkey` both start their enum at `.5x` with no `.25x` below it,
+and `disk` gives `size` a minimum of 5 and a maximum of 500. So both databases
+and both disks are already sitting on their own floor — there is nothing smaller
+to ask for, and the App is the only resource with room to give.
+
+Instance size gates replica count, which the `App` schema does not say: any
+instance below `1x` rejects `replicas` above 1 with `VALIDATION_ERROR` "Only 1
+replica is allowed for this instance". `.25x` and multi-replica are therefore
+mutually exclusive, and the floor spends that trade deliberately — see below.
 
 The App itself takes no `Disk` and no mounts. That is a requirement rather than
-an omission: an app with a disk mount is capped at a single instance, which
-would take the multi-replica behaviour this project exists to show with it.
+an omission: an app with a disk mount is capped at a single instance, so a disk
+would foreclose the multi-replica behaviour permanently, where `.25x` only
+defers it.
+
+### Scaling up to show multiple replicas
+
+At `.25x`/1 replica the leader-and-gateways split still runs — one replica takes
+the lease and does the durable work — but there is no second gateway to fail
+over to, so that half of the demo is not live on a floor-sized deploy. The local
+compose cluster shows it for free (see Local cluster) and is the right place to
+rehearse. To put it on a real pod:
+
+```
+brainpod resource get app <app-name> --json \
+  | jq '.content | .spec.instance = "1x" | .spec.replicas = 2' > /tmp/app.json
+brainpod resource replace app <app-name> --file /tmp/app.json
+brainpod deploy
+```
+
+Two details the CLI does not spell out. `resource get --json` wraps the resource
+in an envelope alongside `status`, `urn` and `_links`, while `replace --file`
+wants the bare `apiVersion`/`kind`/`metadata`/`spec` document — hence the
+leading `.content`. And both fields have to move in the same document: `replace`
+takes a whole resource rather than a field, and the gate validates what it is
+handed, so a document still carrying `.25x` alongside `replicas: 2` is rejected
+whichever order the two edits are made in. A resource change lands in the draft
+revision, so nothing moves until `brainpod deploy`.
+
+Put it back the same way:
+
+```
+brainpod resource get app <app-name> --json \
+  | jq '.content | .spec.instance = ".25x" | .spec.replicas = 1' > /tmp/app.json
+brainpod resource replace app <app-name> --file /tmp/app.json
+brainpod deploy
+```
+
+Two `1x` replicas is 8× the App compute of the floor and the bulk of what the
+pod bills. Billing is per second and the databases do not move, so a scaled-up
+window costs roughly what it is open for — leaving it up after the call is the
+expensive mistake, not the scale-up itself.
 
 Schema migrations live in `migrations/` and are applied at boot under a Postgres
 advisory lock, so every replica may start at once and no init step, job, or
@@ -111,9 +172,11 @@ The first binary frame after it is the board snapshot, so a non-empty board
 returns bytes there. Postgres is already proven by the process reaching ready at
 all, since the boot migration throws on a failed connection.
 
-To prove the multi-replica claim rather than assume it, open two sockets: the
-Route round-robins them onto different pods, `welcome.replica` differs, and a
-stroke drawn on one appears in the other's op frames within a fan-out interval.
+Two sockets prove fan-out but not multi-replica fan-out: at the floor's single
+replica both land on the same pod, `welcome.replica` matches, and a stroke drawn
+on one still reaches the other — through the Valkey stream, just not across a
+process boundary. Reading differing `welcome.replica` values requires either the
+local compose cluster or a deliberate scale-up first.
 
 ## Local cluster
 
@@ -121,3 +184,8 @@ stroke drawn on one appears in the other's op frames within a fan-out interval.
 replicas and Caddy on `localhost:3000`, which is the rig for rehearsing a
 failover before a call. `docker compose stop app-a` mid-stroke is the drill —
 the lease moves to `app-b` and the line being drawn continues.
+
+Because it already runs two replicas behind a load balancer, this is the whole
+multi-replica story at no cost and with nothing to undo afterwards. Prefer it to
+scaling a pod up; reach for a real scale-up only when the point is that Brainpod
+does it, not that the code does.
