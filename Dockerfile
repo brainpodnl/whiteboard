@@ -31,7 +31,6 @@ ENV PORT=3000
 COPY --from=prune /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/public ./public
 COPY migrations ./migrations
 COPY package.json next.config.ts ./
 
